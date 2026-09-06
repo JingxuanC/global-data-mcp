@@ -1,0 +1,7 @@
+numpy>=1.26,<2
+pandas>=2.0
+yfinance>=0.2.40
+stockstats>=0.6
+# FRED / Polymarket / Eastmoney 快讯均走 requests；
+# [socks] extra 供 YAHOO_PROXY=socks5://... 场景使用
+requests[socks]>=2.31
