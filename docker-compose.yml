@@ -1,0 +1,19 @@
+services:
+  global-data-mcp:
+    build: .
+    image: global-data-mcp:latest
+    container_name: global-data-mcp
+    ports:
+      - "50058:50058"
+    environment:
+      #  license 鉴权（可选）：设置后强制 X-License-Key
+      # MCP_LICENSE_FILE: /app/licenses/licenses.json
+      # MCP_WORKERS: "2"            # 异步任务 worker 数（默认 2）
+      # FRED_API_KEY: ""            # get_macro_indicators 必需
+      # YAHOO_PROXY: ""             # yfinance 专用代理，如 socks5://host.docker.internal:1097
+      DATA_CACHE_DIR: /app/.data_cache
+      # DATA_CACHE_TTL: "300"
+    volumes:
+      - ./.data_cache:/app/.data_cache                       # 工具结果缓存持久化
+      # - ./licenses.json:/app/licenses/licenses.json:ro     # license key 文件
+    restart: unless-stopped

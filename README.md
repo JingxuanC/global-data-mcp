@@ -66,6 +66,38 @@ global-data:
   url: http://127.0.0.1:50058/mcp
 ```
 
+## Docker 部署
+
+无需本地 Python 环境，一条命令起服务：
+
+```bash
+docker compose up -d        # 构建镜像 + 启动容器（首次构建约 3-5 分钟）
+docker compose ps           # 查看状态
+docker compose logs -f      # 跟踪日志
+```
+
+验证：
+
+```bash
+curl http://127.0.0.1:50058/health
+curl http://127.0.0.1:50058/tools   # 应返回 14 个工具
+```
+
+license 鉴权（可选）：在 `docker-compose.yml` 中取消 license 相关注释，
+把宿主机 `licenses.json` 挂进容器并设置 `MCP_LICENSE_FILE`：
+
+```yaml
+environment:
+  MCP_LICENSE_FILE: /app/licenses/licenses.json
+volumes:
+  - ./licenses.json:/app/licenses/licenses.json:ro
+```
+
+其他环境变量（`FRED_API_KEY` / `YAHOO_PROXY` / `MCP_WORKERS` 等）同样在
+compose 文件的 `environment` 段配置，改完 `docker compose up -d` 生效。
+注意容器内访问宿主机代理用 `host.docker.internal`（如
+`YAHOO_PROXY=socks5://host.docker.internal:1097`）。
+
 ## 环境变量
 
 | 变量 | 说明 |
