@@ -9,6 +9,7 @@
     GET  /tools         工具列表（JSON schema）
     POST /mcp           MCP JSON-RPC（initialize / tools/list / tools/call）
     GET  /quota         当前 license key 的额度余量（鉴权模式）
+    GET  /metrics       Prometheus 指标（文本格式，不鉴权）
 
 鉴权与额度（mcp_gateway.py）：
     环境变量 MCP_LICENSE_FILE 指向 license JSON 时强制鉴权
@@ -29,11 +30,12 @@ import argparse
 import json
 import logging
 import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from tools import HANDLERS, TOOLS  # noqa: F401 — 副作用：注册全部工具
 
-from mcp_gateway import LicenseStore, QuotaExceeded
+from mcp_gateway import METRICS, LicenseStore, QuotaExceeded
 
 logger = logging.getLogger("global-data-mcp")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -78,6 +80,14 @@ class GlobalDataHandler(BaseHTTPRequestHandler):
                 self._send(401, {"error": info})
                 return
             self._send(200, self.license_store.quota_of(self._license_key()))
+        elif self.path == "/metrics":
+            # Prometheus 抓取端点，不要求鉴权（内网惯例；只含工具名级聚合）
+            body = METRICS.render().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self._send(404, {"error": "not found"})
 
@@ -132,6 +142,7 @@ class GlobalDataHandler(BaseHTTPRequestHandler):
             if store and store.enabled:
                 ok, info = store.check(key)
                 if not ok:
+                    METRICS.inc_call(tool_name, "rejected_license")
                     self._send(200, {"jsonrpc": "2.0", "id": mid,
                                      "error": {"code": -32001, "message": info}})
                     return
@@ -144,17 +155,23 @@ class GlobalDataHandler(BaseHTTPRequestHandler):
                 try:
                     store.consume(key, heavy=False)
                 except QuotaExceeded as e:
+                    METRICS.inc_call(tool_name, "rejected_quota")
                     self._send(200, {"jsonrpc": "2.0", "id": mid,
                                      "error": {"code": -32029, "message": str(e)}})
                     return
+            t0 = time.monotonic()
             try:
                 result = HANDLERS[tool_name](**tool_args)
+                METRICS.inc_call(tool_name, "ok")
                 self._send(200, {"jsonrpc": "2.0", "id": mid, "result": {
                     "content": [{"type": "text", "text": str(result)}], "isError": False}})
             except Exception as e:  # noqa: BLE001
+                METRICS.inc_call(tool_name, "error")
                 logger.error("tool call error %s: %s", tool_name, e)
                 self._send(200, {"jsonrpc": "2.0", "id": mid, "result": {
                     "content": [{"type": "text", "text": f"Error: {e}"}], "isError": True}})
+            finally:
+                METRICS.observe_latency(tool_name, time.monotonic() - t0)
             return
 
         self._send(200, {"jsonrpc": "2.0", "id": mid,

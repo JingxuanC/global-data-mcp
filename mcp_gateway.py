@@ -174,6 +174,68 @@ class LicenseStore:
             logger.warn("usage save failed: %s", e)
 
 
+# ═══════════════ Prometheus 指标 ═══════════════
+
+class Metrics:
+    """纯标准库的线程安全指标收集器，render() 输出 Prometheus 文本格式。
+
+    只收计数器 + 延迟 sum/count（够算平均，不上 histogram 桶），
+    外加进程 uptime gauge。/metrics 端点不要求鉴权——只含工具名级聚合。
+    """
+
+    def __init__(self):
+        self._mu = threading.Lock()
+        self._calls: dict[tuple[str, str], int] = {}      # (tool, status) → count
+        self._lat_sum: dict[str, float] = {}              # tool → seconds sum
+        self._lat_count: dict[str, int] = {}              # tool → count
+        self._started = time.time()
+
+    def inc_call(self, tool: str, status: str):
+        """status ∈ ok / error / rejected_license / rejected_quota / queued"""
+        with self._mu:
+            k = (tool, status)
+            self._calls[k] = self._calls.get(k, 0) + 1
+
+    def observe_latency(self, tool: str, seconds: float):
+        with self._mu:
+            self._lat_sum[tool] = self._lat_sum.get(tool, 0.0) + seconds
+            self._lat_count[tool] = self._lat_count.get(tool, 0) + 1
+
+    def render(self) -> str:
+        with self._mu:
+            calls = sorted(self._calls.items())
+            lat_sum = dict(self._lat_sum)
+            lat_count = dict(self._lat_count)
+        out = [
+            "# HELP mcp_tool_calls_total Tool call count by tool and status.",
+            "# TYPE mcp_tool_calls_total counter",
+        ]
+        for (tool, status), n in calls:
+            out.append(f'mcp_tool_calls_total{{tool="{tool}",status="{status}"}} {n}')
+        out += [
+            "# HELP mcp_tool_latency_seconds_sum Total tool call latency in seconds.",
+            "# TYPE mcp_tool_latency_seconds_sum counter",
+        ]
+        for tool in sorted(lat_sum):
+            out.append(f'mcp_tool_latency_seconds_sum{{tool="{tool}"}} {lat_sum[tool]:.6f}')
+        out += [
+            "# HELP mcp_tool_latency_seconds_count Tool call latency sample count.",
+            "# TYPE mcp_tool_latency_seconds_count counter",
+        ]
+        for tool in sorted(lat_count):
+            out.append(f'mcp_tool_latency_seconds_count{{tool="{tool}"}} {lat_count[tool]}')
+        out += [
+            "# HELP mcp_uptime_seconds Process uptime in seconds.",
+            "# TYPE mcp_uptime_seconds gauge",
+            f"mcp_uptime_seconds {time.time() - self._started:.1f}",
+        ]
+        return "\n".join(out) + "\n"
+
+
+# 全局单例，各 handler 直接 import 使用
+METRICS = Metrics()
+
+
 # ═══════════════ 异步任务队列 ═══════════════
 
 class QueueFull(Exception):

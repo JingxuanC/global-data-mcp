@@ -137,6 +137,30 @@ GET  /health        健康检查
 GET  /tools         工具 JSON schema 列表
 POST /mcp           MCP JSON-RPC（initialize / tools/list / tools/call）
 GET  /quota         license 额度余量（鉴权模式）
+GET  /metrics       Prometheus 指标（文本格式，不鉴权）
+```
+
+## 可观察性 / Observability
+
+`GET /metrics` 输出 Prometheus 文本格式（`text/plain; version=0.0.4`），
+不要求鉴权（内网抓取惯例；只含工具名级聚合，不泄露 license key）。
+
+指标：
+
+| 指标 | 类型 | 说明 |
+|------|------|------|
+| `mcp_tool_calls_total{tool,status}` | counter | 调用计数；status ∈ `ok` / `error` / `rejected_license` / `rejected_quota` / `queued` |
+| `mcp_tool_latency_seconds_sum{tool}` / `mcp_tool_latency_seconds_count{tool}` | counter | 延迟总和与样本数，相除即平均延迟 |
+| `mcp_uptime_seconds` | gauge | 进程启动至今秒数 |
+
+Prometheus scrape 配置示例：
+
+```yaml
+scrape_configs:
+  - job_name: global-data-mcp
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:50058"]
 ```
 
 ## 数据源说明
