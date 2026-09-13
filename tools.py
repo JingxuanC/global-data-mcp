@@ -27,6 +27,15 @@ from typing import Any, Optional
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
 logger = logging.getLogger("global-data-mcp")
 
+
+def fail(msg, code="error", hint=""):
+    """统一错误出口：保证合法 JSON，并让 LLM 能据此纠正。"""
+    payload = {"error": str(msg), "code": code}
+    if hint:
+        payload["hint"] = hint
+    return json.dumps(payload, ensure_ascii=False)
+
+
 # ── Proxy setup (before any network imports) ──
 # 注意：不要全局替换 socket（socks.socksocket）——PySocks 不支持 IPv6 目标地址，
 # 且会污染所有连接，导致国内行情源（东财）失败。
@@ -178,7 +187,7 @@ def tool(name: str, description: str, properties: dict, required: Optional[list]
         TOOLS[name] = ToolDef(name, description, {
             "type": "object",
             "properties": properties,
-            "required": required or list(properties.keys()),
+            "required": required or [],
         })
         HANDLERS[name] = fn
         return fn
@@ -193,7 +202,8 @@ def tool(name: str, description: str, properties: dict, required: Optional[list]
       "Returns CSV with Date,Open,High,Low,Close,Volume columns.",
       {"symbol": {"type": "string", "description": "Ticker symbol (e.g. AAPL, NVDA)"},
        "start_date": {"type": "string", "description": "Start date YYYY-MM-DD"},
-       "end_date": {"type": "string", "description": "End date YYYY-MM-DD"}})
+       "end_date": {"type": "string", "description": "End date YYYY-MM-DD"}},
+      required=["symbol", "start_date", "end_date"])
 def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
     cached = _cache_get("get_stock_data", symbol, start_date, end_date)
     if cached:
@@ -225,7 +235,8 @@ def get_stock_data(symbol: str, start_date: str, end_date: str) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 @tool("get_fundamentals", "Get company fundamentals: market cap, PE, EPS, revenue, margins, ROE, etc.",
-      {"symbol": {"type": "string", "description": "Ticker symbol (e.g. AAPL)"}})
+      {"symbol": {"type": "string", "description": "Ticker symbol (e.g. AAPL)"}},
+      required=["symbol"])
 def get_fundamentals(symbol: str) -> str:
     cached = _cache_get("get_fundamentals", symbol)
     if cached:
@@ -279,7 +290,13 @@ def get_fundamentals(symbol: str) -> str:
 # 3-5. Financial statements
 # ═══════════════════════════════════════════════════════════════
 
+VALID_FREQ = ("quarterly", "annual")
+
+
 def _financial_stmt(symbol: str, freq: str, stmt_type: str, fetcher) -> str:
+    if freq not in VALID_FREQ:
+        raise ValueError(
+            f"invalid freq={freq!r} for get_{stmt_type}: expected one of {list(VALID_FREQ)}")
     cached = _cache_get(f"get_{stmt_type}", symbol, freq)
     if cached:
         return cached
@@ -298,7 +315,9 @@ def _financial_stmt(symbol: str, freq: str, stmt_type: str, fetcher) -> str:
 
 @tool("get_balance_sheet", "Get balance sheet (assets, liabilities, equity).",
       {"symbol": {"type": "string", "description": "Ticker symbol"},
-       "freq": {"type": "string", "description": "'quarterly' or 'annual'"}})
+       "freq": {"type": "string", "enum": ["quarterly", "annual"],
+                "description": "'quarterly' or 'annual' (default 'quarterly')"}},
+      required=["symbol"])
 def get_balance_sheet(symbol: str, freq: str = "quarterly") -> str:
     return _financial_stmt(symbol, freq, "balance_sheet",
                            lambda t: t.quarterly_balance_sheet if freq == "quarterly" else t.balance_sheet)
@@ -306,7 +325,9 @@ def get_balance_sheet(symbol: str, freq: str = "quarterly") -> str:
 
 @tool("get_cashflow", "Get cash flow statement.",
       {"symbol": {"type": "string", "description": "Ticker symbol"},
-       "freq": {"type": "string", "description": "'quarterly' or 'annual'"}})
+       "freq": {"type": "string", "enum": ["quarterly", "annual"],
+                "description": "'quarterly' or 'annual' (default 'quarterly')"}},
+      required=["symbol"])
 def get_cashflow(symbol: str, freq: str = "quarterly") -> str:
     return _financial_stmt(symbol, freq, "cashflow",
                            lambda t: t.quarterly_cashflow if freq == "quarterly" else t.cashflow)
@@ -314,7 +335,9 @@ def get_cashflow(symbol: str, freq: str = "quarterly") -> str:
 
 @tool("get_income_statement", "Get income statement (revenue, costs, profit).",
       {"symbol": {"type": "string", "description": "Ticker symbol"},
-       "freq": {"type": "string", "description": "'quarterly' or 'annual'"}})
+       "freq": {"type": "string", "enum": ["quarterly", "annual"],
+                "description": "'quarterly' or 'annual' (default 'quarterly')"}},
+      required=["symbol"])
 def get_income_statement(symbol: str, freq: str = "quarterly") -> str:
     return _financial_stmt(symbol, freq, "income_statement",
                            lambda t: t.quarterly_income_stmt if freq == "quarterly" else t.income_stmt)
@@ -325,7 +348,8 @@ def get_income_statement(symbol: str, freq: str = "quarterly") -> str:
 # ═══════════════════════════════════════════════════════════════
 
 @tool("get_insider_transactions", "Get recent insider buying/selling activity.",
-      {"symbol": {"type": "string", "description": "Ticker symbol"}})
+      {"symbol": {"type": "string", "description": "Ticker symbol"}},
+      required=["symbol"])
 def get_insider_transactions(symbol: str) -> str:
     cached = _cache_get("get_insider_transactions", symbol)
     if cached:
@@ -349,7 +373,8 @@ def get_insider_transactions(symbol: str) -> str:
 
 @tool("get_news", "Get recent news articles mentioning a specific ticker.",
       {"symbol": {"type": "string", "description": "Ticker symbol (e.g. AAPL)"},
-       "limit": {"type": "integer", "description": "Max articles (default 10)"}})
+       "limit": {"type": "integer", "description": "Max articles (default 10)"}},
+      required=["symbol"])
 def get_news(symbol: str, limit: int = 10) -> str:
     cached = _cache_get("get_news", symbol, str(limit))
     if cached:
@@ -374,7 +399,8 @@ def get_news(symbol: str, limit: int = 10) -> str:
 
 @tool("get_global_news", "Get macro market news from major sources.",
       {"topic": {"type": "string", "description": "Topic keyword (e.g. 'Fed', 'inflation', 'tech')"},
-       "limit": {"type": "integer", "description": "Max articles (default 10)"}})
+       "limit": {"type": "integer", "description": "Max articles (default 10)"}},
+      required=[])
 def get_global_news(topic: str = "", limit: int = 10) -> str:
     cached = _cache_get("get_global_news", topic, str(limit))
     if cached:
@@ -398,6 +424,11 @@ def get_global_news(topic: str = "", limit: int = 10) -> str:
                 tlow = topic.lower()
                 filtered = [n for n in all_news if tlow in str(n).lower()]
             lines = [f"# Global News" + (f" (topic: {topic})" if topic else "")]
+            if topic and not filtered:
+                lines.append(
+                    f"NO_MATCH: 未匹配到 topic={topic!r} 的新闻"
+                    f"（已扫描 {len(all_news)} 条来自 SPY/QQQ/DIA 的新闻）。"
+                    f"请换更宽泛的关键词，或省略 topic 参数。")
             for i, n in enumerate(filtered[:limit]):
                 content = n.get("content", {})
                 title = content.get("title", "") or n.get("title", "")
@@ -436,7 +467,8 @@ INDICATOR_INFO = {
       {"symbol": {"type": "string", "description": "Ticker symbol"},
        "indicator": {"type": "string",
                      "description": "Comma-separated indicator names: rsi,macd,boll,atr,close_50_sma,close_200_sma,close_10_ema,macds,macdh,boll_ub,boll_lb,vwma,mfi"},
-       "lookback_days": {"type": "integer", "description": "Days to look back (default 60)"}})
+       "lookback_days": {"type": "integer", "description": "Days to look back (default 60)"}},
+      required=["symbol", "indicator"])
 def get_indicators(symbol: str, indicator: str, lookback_days: int = 60) -> str:
     cached = _cache_get("get_indicators", symbol, indicator, str(lookback_days))
     if cached:
@@ -509,7 +541,8 @@ FRED_SERIES = {
 @tool("get_macro_indicators", "Get FRED macroeconomic data (Fed rate, CPI, GDP, unemployment, etc.). "
       "Use indicator aliases: fed_funds_rate, cpi, unemployment_rate, gdp, 10y_treasury, vix, etc.",
       {"indicator": {"type": "string", "description": "Indicator alias or FRED series ID (e.g. 'fed_funds_rate', 'cpi', 'unemployment')"},
-       "lookback_days": {"type": "integer", "description": "Days to look back (default 365)"}})
+       "lookback_days": {"type": "integer", "description": "Days to look back (default 365)"}},
+      required=["indicator"])
 def get_macro_indicators(indicator: str, lookback_days: int = 365) -> str:
     cached = _cache_get("get_macro_indicators", indicator, str(lookback_days))
     if cached:
@@ -585,7 +618,8 @@ def get_macro_indicators(indicator: str, lookback_days: int = 365) -> str:
 
 @tool("get_reddit_sentiment", "Get recent Reddit posts mentioning a ticker across finance subreddits.",
       {"symbol": {"type": "string", "description": "Ticker symbol (e.g. AAPL, NVDA)"},
-       "limit": {"type": "integer", "description": "Max posts per subreddit (default 5)"}})
+       "limit": {"type": "integer", "description": "Max posts per subreddit (default 5)"}},
+      required=["symbol"])
 def get_reddit_sentiment(symbol: str, limit: int = 5) -> str:
     cached = _cache_get("get_reddit_sentiment", symbol, str(limit))
     if cached:
@@ -647,7 +681,8 @@ def get_reddit_sentiment(symbol: str, limit: int = 5) -> str:
 
 @tool("get_stocktwits_sentiment", "Get StockTwits messages for a ticker with bullish/bearish labels.",
       {"symbol": {"type": "string", "description": "Ticker symbol"},
-       "limit": {"type": "integer", "description": "Max messages (default 30)"}})
+       "limit": {"type": "integer", "description": "Max messages (default 30)"}},
+      required=["symbol"])
 def get_stocktwits_sentiment(symbol: str, limit: int = 30) -> str:
     cached = _cache_get("get_stocktwits_sentiment", symbol, str(limit))
     if cached:
@@ -698,7 +733,8 @@ def get_stocktwits_sentiment(symbol: str, limit: int = 30) -> str:
 
 @tool("get_prediction_markets", "Get Polymarket prediction market probabilities for an event topic.",
       {"topic": {"type": "string", "description": "Event topic (e.g. 'Fed rate cut', 'recession 2026', 'US election')"},
-       "limit": {"type": "integer", "description": "Max markets (default 6)"}})
+       "limit": {"type": "integer", "description": "Max markets (default 6)"}},
+      required=["topic"])
 def get_prediction_markets(topic: str, limit: int = 6) -> str:
     cached = _cache_get("get_prediction_markets", topic, str(limit))
     if cached:
@@ -774,7 +810,8 @@ def get_prediction_markets(topic: str, limit: int = 6) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 @tool("get_a_global_news", "Get 7x24 global financial news from Eastmoney (全球资讯). Returns title, summary, time.",
-      {"page_size": {"type": "integer", "description": "Articles to fetch (default 50)"}})
+      {"page_size": {"type": "integer", "description": "Articles to fetch (default 50)"}},
+      required=[])
 def get_a_global_news(page_size: int = 50) -> str:
     import json as _json, uuid as _uuid
     cached = _cache_get("get_a_global_news", str(page_size))
@@ -802,4 +839,5 @@ def get_a_global_news(page_size: int = 50) -> str:
         _cache_set("get_a_global_news", result, str(page_size))
         return result
     except Exception as e:
-        return '{"error":"%s"}' % str(e)
+        return fail(e, code="fetch_error",
+                    hint="Eastmoney 7x24 接口暂时不可用，可稍后重试或改用 get_global_news")
