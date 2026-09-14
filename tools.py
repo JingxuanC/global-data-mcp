@@ -25,169 +25,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
-logger = logging.getLogger("global-data-mcp")
-
-
-def fail(msg, code="error", hint=""):
-    """统一错误出口：保证合法 JSON，并让 LLM 能据此纠正。"""
-    payload = {"error": str(msg), "code": code}
-    if hint:
-        payload["hint"] = hint
-    return json.dumps(payload, ensure_ascii=False)
-
-
-# ═══════════════════════════════════════════════════════════════
-# 参数类型强制
-#
-# 调用方是 LLM Agent（背后是不会写提示词的散户），把数字传成字符串
-# （lookback_days="60"）或显式传 null 是常态。旧实现直接
-# HANDLERS[name](**args) 解包，会在 min/max 比较或切片处抛
-# "'>' not supported between instances of 'str' and 'int'"，LLM 无法据此纠正。
-# 这里按 handler 签名注解做轻量转换；转不了就返回点明参数名与期望类型的错误。
-# ═══════════════════════════════════════════════════════════════
-
-_ANN_NAME = {int: "integer", float: "number", bool: "boolean",
-             str: "string", list: "array", dict: "object"}
-_BOOL_TRUE = {"true", "1", "yes", "y", "on"}
-_BOOL_FALSE = {"false", "0", "no", "n", "off"}
-_EXAMPLE = {"integer": "5", "number": "5.0", "boolean": "true",
-            "string": "'AAPL'", "array": "['600519']", "object": "{}"}
-
-
-def _ann_type(ann):
-    """注解 → 真实类型（本模块用 from __future__ import annotations，
-    注解是字符串，例如 'int'、'str'）。"""
-    if ann is inspect.Parameter.empty or ann is None:
-        return None
-    if isinstance(ann, str):
-        return {"int": int, "float": float, "bool": bool, "str": str,
-                "list": list, "dict": dict}.get(ann.strip())
-    return ann
-
-
-def _arg_fail(name, expected, value):
-    return fail("参数 '%s' 类型错误：期望 %s，实际收到 %r（%s）"
-                % (name, expected, value, type(value).__name__),
-                code="invalid_argument",
-                hint="参数 '%s' 请传 %s 类型，例如 %s=%s"
-                     % (name, expected, name, _EXAMPLE.get(expected, "值")))
+# ── 公共原语：mcp-common 是唯一真源（副本由 mcp-common/sync.py 生成）──
+from mcp_common import coerce_args, fail
 
 
 def coerce_tool_args(tool_name, args):
-    """调用 handler 前做轻量类型强制。→ (新参数 dict, None) 或 (None, fail_json)。"""
-    fn = HANDLERS.get(tool_name)
-    if fn is None or not isinstance(args, dict):
-        return args, None
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):
-        return args, None
-    params = sig.parameters
-    out = dict(args)
-    if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        unknown = [k for k in out if k not in params]
-        if unknown:
-            return None, fail(
-                "工具 %s 不支持参数 %s" % (tool_name, ", ".join("'%s'" % u for u in unknown)),
-                code="unknown_argument",
-                hint="支持的参数: " + (", ".join(params) or "（无）"))
-    for name, val in list(out.items()):
-        if name not in params:
-            continue
-        p = params[name]
-        if p.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
-            continue
-        ann = _ann_type(p.annotation)
-        if ann is None:
-            continue
-        if val is None:
-            # 显式传 null：有默认值就当没传，否则报必填
-            if p.default is not inspect.Parameter.empty:
-                out.pop(name, None)
-            else:
-                return None, fail("参数 '%s' 不能为 null" % name, code="invalid_argument",
-                                  hint="参数 '%s' 是必填项，请提供 %s 类型的值"
-                                       % (name, _ANN_NAME.get(ann, "正确")))
-            continue
-        if ann is int:
-            if isinstance(val, bool):
-                out[name] = int(val)
-            elif isinstance(val, int):
-                continue
-            elif isinstance(val, float):
-                if float(val).is_integer():
-                    out[name] = int(val)
-                else:
-                    return None, _arg_fail(name, "integer", val)
-            elif isinstance(val, str):
-                try:
-                    out[name] = int(val.strip())
-                except ValueError:
-                    try:
-                        f = float(val.strip())
-                    except ValueError:
-                        return None, _arg_fail(name, "integer", val)
-                    if not f.is_integer():
-                        return None, _arg_fail(name, "integer", val)
-                    out[name] = int(f)
-            else:
-                return None, _arg_fail(name, "integer", val)
-        elif ann is float:
-            if isinstance(val, bool):
-                out[name] = float(val)
-            elif isinstance(val, (int, float)):
-                out[name] = float(val)
-            elif isinstance(val, str):
-                try:
-                    out[name] = float(val.strip())
-                except ValueError:
-                    return None, _arg_fail(name, "number", val)
-            else:
-                return None, _arg_fail(name, "number", val)
-        elif ann is bool:
-            if isinstance(val, bool):
-                continue
-            if isinstance(val, int) and val in (0, 1):
-                out[name] = bool(val)
-            elif isinstance(val, str) and val.strip().lower() in _BOOL_TRUE | _BOOL_FALSE:
-                out[name] = val.strip().lower() in _BOOL_TRUE
-            else:
-                return None, _arg_fail(name, "boolean", val)
-        elif ann is str:
-            if isinstance(val, str):
-                continue
-            if isinstance(val, bool) or isinstance(val, int):
-                out[name] = str(val)
-            elif isinstance(val, float):
-                out[name] = str(int(val)) if val.is_integer() else str(val)
-            else:
-                return None, _arg_fail(name, "string", val)
-        elif ann is list:
-            if isinstance(val, list):
-                continue
-            if isinstance(val, str):
-                try:
-                    parsed = json.loads(val)
-                except (ValueError, TypeError):
-                    parsed = [x.strip() for x in val.split(",") if x.strip()]
-                if isinstance(parsed, list):
-                    out[name] = parsed
-                    continue
-            return None, _arg_fail(name, "array", val)
-        elif ann is dict:
-            if isinstance(val, dict):
-                continue
-            if isinstance(val, str):
-                try:
-                    parsed = json.loads(val)
-                except (ValueError, TypeError):
-                    parsed = None
-                if isinstance(parsed, dict):
-                    out[name] = parsed
-                    continue
-            return None, _arg_fail(name, "object", val)
-    return out, None
+    """调用 handler 前做轻量类型强制（绑定本服务注册表）。→ (args, None) 或 (None, fail_json)。"""
+    return coerce_args(HANDLERS, tool_name, args)
+
+
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
+logger = logging.getLogger("global-data-mcp")
 
 
 # ── Proxy setup (before any network imports) ──

@@ -36,34 +36,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from tools import HANDLERS, TOOLS, fail  # noqa: F401 — 副作用：注册全部工具
 
 from mcp_gateway import METRICS, LicenseStore, QuotaExceeded
+from mcp_common import tool_failed as _tool_failed
 
 logger = logging.getLogger("global-data-mcp")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 SERVER_NAME = "global-data-mcp"
 VERSION = "1.0.0"
-
-
-def _tool_failed(result) -> bool:
-    """工具层失败判定。
-
-    handler 内部普遍吞掉异常并返回错误文本，因此服务层需要识别失败结果，
-    才能像异常路径一样置 isError=True：
-      - 统一错误出口 fail() 产出的 JSON 对象（含 "error" 键）
-      - 声称是 JSON 却解析失败（非法 JSON 输出 = 工具损坏）
-      - 文本错误约定 "ERROR: ..." 前缀
-    NO_DATA / NO_MATCH / "No ... found" 是合法空结果，不算失败。
-    """
-    text = str(result).lstrip()
-    if text.startswith("ERROR:"):
-        return True
-    if text.startswith("{"):
-        try:
-            obj = json.loads(text)
-        except json.JSONDecodeError:
-            return True
-        return isinstance(obj, dict) and "error" in obj
-    return False
 
 
 class GlobalDataHandler(BaseHTTPRequestHandler):
